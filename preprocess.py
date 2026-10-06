@@ -17,17 +17,54 @@ from SSINS import INS, MF, SS
 warnings.filterwarnings("ignore")
 
 
-ABS_DIR     = "/oscar/data/jpober/jmduchar/Research/BayesRFI/"
-CB_PATH     = os.path.join(os.path.dirname(__file__), "coarse_bands_1D.npy")
-CB          = np.load(CB_PATH)
+ABS_DIR     = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Research/BayesRFI/")
 TV_SUBBANDS = ('subTV', 'TV6', 'TV7', 'TV8', 'TV9')
 
+# MWA coarse-channel layout used to build the coarse-band flag mask.
+N_COARSE        = 24      # coarse channels in an observation
+COARSE_BW_HZ    = 1.28e6  # coarse channel width
+EDGE_FLAG_HZ    = 80e3    # width flagged at each coarse-channel edge (aliasing)
+
 # Raw visibilities in, reduced per-sub-band time series out.
-DATA_DIR = "/users/jmduchar/data/shared/big_dataset/"
+DATA_DIR = os.environ.get("BAYESRFI_DATA_DIR", "/users/jmduchar/data/shared/big_dataset/")
 OUT_DIR  = os.path.join(ABS_DIR, "data/")
 
 
-def build_initial_uvflag(ins, obs, uvf_save_dir, drop_first_last):
+def coarse_band_mask(freq_array, n_coarse=N_COARSE, coarse_bw=COARSE_BW_HZ, edge_flag=EDGE_FLAG_HZ):
+    """
+    Boolean mask of the fine channels to flag in every MWA coarse channel: the
+    `edge_flag` Hz at each edge (aliased by the polyphase filterbank) and the
+    centre (DC) channel. Derived from the frequency axis so it works for any
+    fine-channel width (10/20/40 kHz, ...), not just the 768-channel 40 kHz layout.
+
+    Parameters
+    ----------
+    freq_array : ndarray
+        Fine-channel centre frequencies in Hz, ascending.
+
+    Returns
+    -------
+    ndarray of bool, shape (Nfreqs,)
+        True for channels to flag.
+    """
+    freq_array = np.asarray(freq_array).ravel()
+    nfreqs = freq_array.size
+    if nfreqs % n_coarse:
+        raise ValueError(f"Nfreqs={nfreqs} is not a multiple of {n_coarse} coarse channels")
+    n_fine = nfreqs // n_coarse
+    df     = float(np.median(np.diff(freq_array)))
+    if not np.isclose(n_fine * df, coarse_bw, rtol=1e-3):
+        raise ValueError(f"{n_fine} fine channels x {df/1e3:.1f} kHz != {coarse_bw/1e6} MHz coarse channel")
+    n_edge = int(round(edge_flag / df))
+    cb = np.zeros(nfreqs, dtype=bool)
+    for c in range(n_coarse):
+        cb[c * n_fine : c * n_fine + n_edge]          = True
+        cb[(c + 1) * n_fine - n_edge : (c + 1) * n_fine] = True
+        cb[c * n_fine + n_fine // 2]                  = True
+    return cb
+
+
+def build_initial_uvflag(ins, obs, uvf_save_dir, drop_first_last, cb):
     """
     Build and save a UVFlag seeded with coarse-band and edge-time flags.
 
@@ -45,6 +82,8 @@ def build_initial_uvflag(ins, obs, uvf_save_dir, drop_first_last):
         Directory where the output .h5 file will be written.
     drop_first_last : bool
         If True, flag the first and last time integrations.
+    cb : ndarray of bool
+        Coarse-band channel mask from `coarse_band_mask`.
     """
     uvf = UVFlag()
     for attr in uvf.__dict__:
@@ -56,7 +95,7 @@ def build_initial_uvflag(ins, obs, uvf_save_dir, drop_first_last):
 
     # Overwrite flags (just need CB and first-last flags)
     uvf.flag_array = np.zeros_like(uvf.flag_array)
-    uvf.flag_array[:,CB,:] = 1
+    uvf.flag_array[:,cb,:] = 1
 
     if drop_first_last:
         uvf.flag_array[0,:,:] = 1
@@ -102,7 +141,8 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
     Raises
     ------
     ValueError
-        If the number of frequency channels in the loaded data is not 768.
+        If the frequency axis does not match the MWA coarse-channel layout
+        (see `coarse_band_mask`).
     """
 
     obsfiles = glob.glob(data_dir+f"*{obsid}*fits")
@@ -112,10 +152,9 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
     if verbose:
         print(f"OBSID {obsid} successfully read in as an SS object.")
 
-    if ss.Nfreqs != 768:
-        raise ValueError(f"Wrong Nfreq value for {obsid}. Expected 768, got {ss.Nfreqs}")
+    cb = coarse_band_mask(ss.freq_array)
 
-    initial_flags = np.broadcast_to(CB[np.newaxis, :, np.newaxis], (ss.Ntimes, ss.Nfreqs, ss.Npols)).copy()
+    initial_flags = np.broadcast_to(cb[np.newaxis, :, np.newaxis], (ss.Ntimes, ss.Nfreqs, ss.Npols)).copy()
 
     if drop_first_last:
         initial_flags[[0, -1], :, :] = True
@@ -151,11 +190,58 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
         ins, event_record=True, time_broadcast=False, freq_broadcast=False
     )
 
-    build_initial_uvflag(ins, obsid, uvf_save_dir, drop_first_last)
+    build_initial_uvflag(ins, obsid, uvf_save_dir, drop_first_last, cb)
 
     if drop_first_last:
         ins.select(times=np.unique(ins.time_array[1:-1]))
-        
+
+    # INS (a waterfall UVFlag) has Nbls=None; remember how many baselines went
+    # into the incoherent average for the thermal-noise estimate downstream.
+    ins.nbls_averaged = int(ss.Nbls)
+
+    return ins
+
+
+def _ins_cache_paths(ins_dir, obs):
+    """Per-obsid on-disk INS cache: (data file, mask file, nbls sidecar)."""
+    prefix = os.path.join(ins_dir, str(obs))
+    return prefix + "_SSINS_data.h5", prefix + "_SSINS_mask.h5", prefix + "_nbls.txt"
+
+
+def _build_ins_safe(obs, build_kwargs, ins_dir=None):
+    """
+    build_ins wrapper that turns a corrupted/unreadable obsid into None (with a
+    warning). When `ins_dir` is given the INS is written there (data + mask) and
+    the cache paths are returned instead of the object: INS objects cannot be
+    pickled back from a worker process (SSINS `_data_params` breaks in
+    `__setstate__`), and a cached INS lets a night be resumed after a crash.
+    """
+    if ins_dir is not None:
+        data_path, mask_path, nbls_path = _ins_cache_paths(ins_dir, obs)
+        if os.path.exists(data_path) and os.path.exists(mask_path) and os.path.exists(nbls_path):
+            print(f"OBSID {obs}: using cached INS in {ins_dir}")
+            return (data_path, mask_path, nbls_path)
+    try:
+        ins = build_ins(obsid=obs, **build_kwargs)
+    except (TypeError, ValueError) as e:  # some files are corrupted on disk
+        print(f"WARNING: skipping OBSID {obs}: {type(e).__name__}: {e}")
+        return None
+    if ins_dir is None:
+        return ins
+    os.makedirs(ins_dir, exist_ok=True)
+    ins.write(os.path.join(ins_dir, str(obs)), output_type="data", clobber=True)
+    ins.write(os.path.join(ins_dir, str(obs)), output_type="mask", clobber=True)
+    with open(nbls_path, "w") as f:
+        f.write(f"{ins.nbls_averaged}\n")
+    return (data_path, mask_path, nbls_path)
+
+
+def _load_cached_ins(paths):
+    """Reload an INS written by `_build_ins_safe(..., ins_dir=...)`."""
+    data_path, mask_path, nbls_path = paths
+    ins = INS(data_path, mask_file=mask_path)
+    with open(nbls_path) as f:
+        ins.nbls_averaged = int(f.read().strip())
     return ins
 
 
@@ -251,19 +337,28 @@ def process_night_pointing(
     os.makedirs(uvf_save_dir, exist_ok=True)
 
     ins = None
+    nbls_per_obs = []
 
-    for obs in obsids:
-        try:
-            sub_ins = build_ins(
-                obsid           = obs,
-                data_dir        = in_dir,
-                drop_first_last = drop_first_last,
-                uvf_save_dir    = uvf_save_dir,
-                verbose         = verbose
-                )
-        except (TypeError, ValueError):  # some files are corrupted on disk
+    # Reading one 2-minute MWA observation takes several minutes and ~30 GB,
+    # so allow the per-obsid work to run in parallel (BAYESRFI_NPROC, default 1).
+    nproc = int(os.environ.get("BAYESRFI_NPROC", "1"))
+    build_kwargs = dict(data_dir=in_dir, drop_first_last=drop_first_last,
+                        uvf_save_dir=uvf_save_dir, verbose=verbose)
+    ins_dir = os.path.join(out_dir, "ins")  # per-obsid INS cache (also makes reruns cheap)
+    if nproc > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=nproc) as pool:
+            futures = [pool.submit(_build_ins_safe, obs, build_kwargs, ins_dir) for obs in obsids]
+            results = [f.result() for f in futures]
+    else:
+        results = [_build_ins_safe(obs, build_kwargs, ins_dir) for obs in obsids]
+
+    for obs, sub_ins in zip(obsids, results):
+        if sub_ins is None:
             continue
-
+        if isinstance(sub_ins, tuple):
+            sub_ins = _load_cached_ins(sub_ins)
+        nbls_per_obs.append(sub_ins.nbls_averaged)
         if ins is None:
             ins = sub_ins
         else:
@@ -271,11 +366,19 @@ def process_night_pointing(
 
     if ins is None:
         raise RuntimeError("build_ins failed for all obsids")
-        
+
     del sub_ins
 
     t_padded = mm_utils.pad_time_array(ins.time_array)
 
+    # Number of baselines actually averaged into the INS (pyuvdata drops
+    # metafits-flagged tiles by default, so this is < Ntiles*(Ntiles-1)/2).
+    nbls = int(np.median(nbls_per_obs))
+    if len(set(nbls_per_obs)) > 1:
+        print(f"WARNING: Nbls varies across obsids ({min(nbls_per_obs)}-{max(nbls_per_obs)}); using median {nbls}")
+    n_channels = {}
+
+    CB          = coarse_band_mask(ins.freq_array)
     flags       = ins.metric_array.mask[:,:,0].copy() # SSINS flags are 4 identical copies along pol axis
     flags[:,CB] = 0  # Unmask CB so the 1D avg only considers valid channels
     
@@ -307,8 +410,16 @@ def process_night_pointing(
             obsids     = obsids,
             tv_subband = tv_subband,
             pointing   = pointing,
-            date       = date
+            date       = date,
+            nbls       = nbls,
+            nchan      = int((freq_mask & ~CB).sum()),
         )
+        n_channels[tv_subband] = int((freq_mask & ~CB).sum())
+
+    # Channels averaged per sub-band, consumed by mixture_model.calculate_sigma_clean
+    import yaml
+    with open(os.path.join(out_dir, "N_channels.yaml"), "w") as f:
+        yaml.safe_dump(n_channels, f)
 
     if verbose:
         print(f"Finished processing night of {date}, pointing {pointing}.")

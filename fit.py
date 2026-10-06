@@ -18,11 +18,13 @@ from numpyro.infer import MCMC, NUTS, init_to_median
 
 import mixture_model
 
-numpyro.set_host_device_count(48)  # assumes 48-core device
+# One host device per chain, capped by the cores actually available.
+N_CHAINS = min(48, os.cpu_count() or 1)
+numpyro.set_host_device_count(N_CHAINS)
 
 from jax import random as jrandom
 
-ABS_DIR       = "/oscar/data/jpober/jmduchar/Research/BayesRFI/"
+ABS_DIR       = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Research/BayesRFI/")
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
 POLARIZATIONS = ['xx', 'yy']
@@ -83,7 +85,10 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     with open(ABS_DIR+'data/N_channels.yaml', "r") as f:
         tv_subband_dict = yaml.safe_load(f)
 
-    sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband)
+    nbls   = [int(d['nbls'])  for d in all_data] if all('nbls'  in d for d in all_data) else None
+    nchans = [int(d['nchan']) for d in all_data] if all('nchan' in d for d in all_data) else None
+    sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband,
+                                                      nbls=nbls, nchans=nchans)
     data_dict = mixture_model.prepare_multiple_nights(raw_samples,
             L=L, flags=ssins_flags, night_ids=night_ids, obsids=obsids, times=times
         )
@@ -103,7 +108,7 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
         kernel,
         num_warmup  = 6000,
         num_samples = 3000,
-        num_chains  = 48,
+        num_chains  = N_CHAINS,
     )
 
     # random_seed = np.random.randint(0,1000)

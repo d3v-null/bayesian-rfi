@@ -15,7 +15,7 @@ from pyuvdata import UVFlag
 warnings.filterwarnings("ignore")
 
 
-ABS_DIR = "/oscar/data/jpober/jmduchar/Research/BayesRFI/"
+ABS_DIR = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Research/BayesRFI/")
 
 TV_BANDS = {
     'subTV': (0,       174e6),

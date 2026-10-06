@@ -11,7 +11,7 @@ import seaborn as sns
 
 plt.style.use('seaborn-v0_8-white')  # the style the paper figures are drawn in
 
-ABS_DIR = "/oscar/data/jpober/jmduchar/Research/BayesRFI/"
+ABS_DIR = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Research/BayesRFI/")
 
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
@@ -273,6 +273,7 @@ def summarize_season(run_dir, half=None):
         ax.set_ylabel("Soft label (p_rfi)")
         ax.set_title(f"RFI responsibility over time — TV7, pol={pol}")
         plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f"rfi_responsibility_vs_time_TV7_{pol}.png"), dpi=300, bbox_inches='tight')
         plt.show()
 
 

@@ -22,8 +22,29 @@ propagated back into [pyuvdata](https://pyuvdata.readthedocs.io/en/latest/) `UVF
 
 ## Environment
 
-Key dependencies: `pyuvdata`, `SSINS`, `numpyro`, `jax`, `arviz`, `h5py`, `astropy`, `pandas`,
-`matplotlib`/`seaborn`.
+```bash
+pip install -r requirements.txt
+```
+
+Key dependencies: `pyuvdata` (3.x), `SSINS` (git, pyuvdata-3 compatible commit pinned in
+`requirements.txt`), `numpyro`, `jax`, `arviz` (0.x API), `h5py`, `astropy`, `pandas`,
+`matplotlib`/`seaborn`/`corner`.
+
+### Paths
+
+All stages locate their input and output trees through two environment variables (the hard-coded
+defaults are the authors' cluster paths):
+
+| Variable | Meaning | Used by |
+| --- | --- | --- |
+| `BAYESRFI_DATA_DIR` | directory holding the raw `.fits` / `.metafits` files (flat, one directory) | `preprocess.py` |
+| `BAYESRFI_ABS_DIR` | project root: stage 1 writes `data/` here, later stages read it and write `<run-dir>/` under it | all stages |
+| `BAYESRFI_NPROC` | number of observations `preprocess.py` reads in parallel (default 1; each needs ~30 GB) | `preprocess.py` |
+
+```bash
+export BAYESRFI_DATA_DIR=/path/to/raw/
+export BAYESRFI_ABS_DIR=/path/to/project/
+```
 
 ## Command-line convention
 
@@ -73,10 +94,14 @@ builds an `SS`/`INS` object per obsid, runs an SSINS match filter tuned for DTV 
 edge-time flags, and writes per-sub-band frequency-averaged metric time series (`.npz`) plus
 one `UVFlag` file per obsid.
 
-WARNING: `DATA_DIR` (location of raw input data) and `OUT_DIR` (location of output processed data) 
-are hardcoded in `preprocess.py`; you must update these!
+Set `BAYESRFI_DATA_DIR` and `BAYESRFI_ABS_DIR` (see *Paths* above). Reading one observation takes
+several minutes and ~30 GB; `BAYESRFI_NPROC=N` reads N observations at once. Each observation's INS is
+cached under `{OUT_DIR}/ins/` (INS objects cannot be pickled between processes, and the cache lets a
+night be resumed after a crash). The coarse-band mask is derived from the frequency axis, so any
+fine-channel width works, and the number of baselines averaged is stored per night for the noise model.
 
-**Out:** `{OUT_DIR}/tv_split/{tv_subband}/processed_{obsn}_p{pointing}.npz`, `{OUT_DIR}/uvflag/{obsid}_flags.h5`
+**Out:** `{OUT_DIR}/tv_split/{tv_subband}/processed_{obsn}_p{pointing}.npz`,
+`{OUT_DIR}/uvflag/{obsid}_flags.h5`, `{OUT_DIR}/ins/{obsid}_SSINS_{data,mask}.h5`, `{OUT_DIR}/N_channels.yaml`
 
 ### 2. Fit the mixture model — `fit.py`
 
@@ -90,7 +115,7 @@ python fit.py <job_index> --run-dir out_random \
 
 One task per (pointing, TV sub-band, polarization). Loads every night's `.npz` for that
 combination (dropping nights that exceed the SSINS flagged-fraction tolerance), fits the
-hierarchical mixture model with NUTS across 48 chains, and writes the posterior plus a notes
+hierarchical mixture model with NUTS across 48 chains (fewer on machines with fewer cores), and writes the posterior plus a notes
 sidecar. The nights actually used are written verbatim to a `..._nights.txt` sidecar so stage 3
 can replay exactly the same set (e.g. in case of random split)
 

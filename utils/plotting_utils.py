@@ -213,7 +213,7 @@ def plot_trace_corner(idata, savefig=False, savepath=None, show=False):
                     'scale_rfi', 
                     'w_clean',
                 ],
-              figure_kwargs={"figsize": (12, 3)})
+              figsize=(12, 3))  # `figure_kwargs` is the arviz>=1.0 spelling; `figsize` works on 0.x
     plt.tight_layout()
     if savefig:
         plt.savefig(os.path.join(savepath,"trace_plot.png"), dpi=300, bbox_inches='tight')

@@ -222,7 +222,7 @@ def build_dataset(pointing, tv_subband, abs_directory, tol=0.33):
         See `reject_nights`.
     """
     all_files = sorted(glob.glob(
-        os.path.join(abs_directory, f"data/raw_data/{tv_subband}/raw_data_*_p{pointing}.npz")
+        os.path.join(abs_directory, f"data/tv_split/{tv_subband}/processed_*_p{pointing}.npz")
     ))
 
     if not all_files:
@@ -347,7 +347,7 @@ def prepare_multiple_nights(samples, L, flags, night_ids, obsids, times):
     }
 
 
-def calculate_sigma_clean(samples, tv_subband_dict, tv_subband):
+def calculate_sigma_clean(samples, tv_subband_dict, tv_subband, nbls=None, nchans=None):
     """
     Calculate the expected thermal noise standard deviation for each night.
 
@@ -355,6 +355,13 @@ def calculate_sigma_clean(samples, tv_subband_dict, tv_subband):
     ----------
     samples : list of array-like
         Raw nightly data arrays.
+    tv_subband_dict : dict
+        Sub-band -> number of fine channels averaged (fallback when `nchans` is None).
+    nbls : sequence of int, optional
+        Per-night number of baselines averaged into the INS (from the npz
+        `nbls` key). Falls back to the Phase I value 128*127/2 if None.
+    nchans : sequence of int, optional
+        Per-night number of channels averaged (npz `nchan` key).
 
     Returns
     -------
@@ -362,11 +369,14 @@ def calculate_sigma_clean(samples, tv_subband_dict, tv_subband):
         Per-night thermal noise standard deviation.
     """
     C = 4/np.pi - 1
-    Nbl = 128*127/2  # Nbl = 8128
-    Nchannels = tv_subband_dict[tv_subband] # Channels averaged together
+    N = len(samples)
+    if nbls is None:
+        nbls = [128*127/2] * N  # Nbl = 8128, Phase I with no flagged tiles
+    if nchans is None:
+        nchans = [tv_subband_dict[tv_subband]] * N  # Channels averaged together
 
     sigma_clean = []
-    for sample in samples:
+    for sample, Nbl, Nchannels in zip(samples, nbls, nchans):
         valid_mask = np.isfinite(sample)
         valid_sample = sample[valid_mask]  # only consider valid samples
         mu_hat = np.median(valid_sample)

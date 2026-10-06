@@ -80,7 +80,10 @@ def load_input_data(L, abs_dir, tv_subband, pointing, polarization, keep_night_i
     with open(abs_dir+'data/N_channels.yaml', "r") as f:
         tv_subband_dict = yaml.safe_load(f)
 
-    sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband)
+    nbls   = [int(d['nbls'])  for d in all_data] if all('nbls'  in d for d in all_data) else None
+    nchans = [int(d['nchan']) for d in all_data] if all('nchan' in d for d in all_data) else None
+    sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband,
+                                                      nbls=nbls, nchans=nchans)
     data_dict = mixture_model.prepare_multiple_nights(raw_samples,
                                                     L=L,
                                                     flags=ssin_flags,
