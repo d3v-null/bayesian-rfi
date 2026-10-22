@@ -14,7 +14,9 @@ import cli
 import numpy as np
 import numpyro
 import yaml
+from numpyro.handlers import reparam
 from numpyro.infer import MCMC, NUTS, init_to_median
+from numpyro.infer.reparam import LocScaleReparam
 
 import mixture_model
 
@@ -41,9 +43,37 @@ JOB_MAP = {
     )
 }
 
+# `--pool-pointings`: one task per (sub-band, pol), every pointing in one fit
+POOLED_JOB_MAP = {
+    idx: (L, tv, mixture_model.POOLED_POINTING, pol)
+    for idx, (tv, pol) in enumerate(
+        (tv, pol)
+        for tv   in TV_SUBBANDS
+        for pol  in POLARIZATIONS
+    )
+}
+
+# NUTS settings of the paper (Section IV); overridable for quick test runs
+NUM_WARMUP  = 6000
+NUM_SAMPLES = 3000
+
 def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
-                    split_method=None, half=None):
+                    split_method=None, half=None,
+                    num_warmup=NUM_WARMUP, num_samples=NUM_SAMPLES, num_chains=N_CHAINS,
+                    rescale_noise=None, non_centred=False):
     """
+    non_centred : bool, optional
+        Sample the per-night Legendre coefficients non-centred
+        (`beta = loc + scale * beta_decentered`). The same model; it removes the
+        mu_beta/sigma_beta funnel that makes NUTS diverge when there are only a
+        few nights (e.g. the blocks of one night). `beta` is still recorded.
+    rescale_noise : float, optional
+        If given, rescale the data so the median noise is this value (see
+        `mixture_model.rescale_to_noise`); the factor is saved in a `_scale.txt`
+        sidecar for postprocessing.
+    pointing : int or str
+        Pointing index, or `mixture_model.POOLED_POINTING` to fit every
+        pointing's (night, pointing) blocks together.
     split_method : {None, 'chrono', 'random'}, optional
         If given (together with `half`), restricts the fit to half the
         season: 'chrono' splits nights at the midpoint by time, 'random'
@@ -64,6 +94,12 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     )
 
     print(f"Rejected {len(rejected_nights)} nights: {rejected_nights}")
+
+    if not all_files:
+        # e.g. a sub-band the data doesn't cover (a single coarse channel only
+        # reaches one), or every night rejected
+        print(f"Nothing to fit for {tv_subband}, pointing {pointing}.")
+        return
 
     if split_method == "chrono":
         all_files, night_ids = mixture_model.chrono_split_nights(all_files, night_ids, half)
@@ -89,6 +125,10 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     nchans = [int(d['nchan']) for d in all_data] if all('nchan' in d for d in all_data) else None
     sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband,
                                                       nbls=nbls, nchans=nchans)
+    scale = 1.0
+    if rescale_noise is not None:
+        raw_samples, sigma_clean, scale = mixture_model.rescale_to_noise(raw_samples, sigma_clean, rescale_noise)
+        print(f"Rescaled data by {scale:.6g} to a median noise of {rescale_noise}")
     data_dict = mixture_model.prepare_multiple_nights(raw_samples,
             L=L, flags=ssins_flags, night_ids=night_ids, obsids=obsids, times=times
         )
@@ -97,8 +137,12 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     # Run model
     # ----------------------------
 
+    model = mixture_model.model
+    if non_centred:
+        model = reparam(model, config={"beta": LocScaleReparam(centered=0)})
+
     kernel = NUTS(
-        mixture_model.model, 
+        model,
         init_strategy      = init_to_median(num_samples=1000), 
         max_tree_depth     = 8,
         target_accept_prob = 0.6,
@@ -106,9 +150,9 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
 
     mcmc = MCMC(
         kernel,
-        num_warmup  = 6000,
-        num_samples = 3000,
-        num_chains  = N_CHAINS,
+        num_warmup  = num_warmup,
+        num_samples = num_samples,
+        num_chains  = num_chains,
     )
 
     # random_seed = np.random.randint(0,1000)
@@ -140,6 +184,10 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     with open(os.path.join(run_dir, "chains", f"{run_tag}_nights.txt"), "w") as f:
         f.write("\n".join(night_ids) + "\n")
 
+    if rescale_noise is not None:
+        with open(os.path.join(run_dir, "chains", f"{run_tag}_scale.txt"), "w") as f:
+            f.write(f"{scale!r}\n")
+
     notes = f"""
     timestamp     : {timestamp}
     pointing      : {pointing}
@@ -154,6 +202,8 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
     num_samples   : {mcmc.num_samples}
     num_chains    : {mcmc.num_chains}
     num_nights    : {len(data_dict['lengths'])}
+    data_scale    : {scale}
+    non_centred   : {non_centred}
     rfi_dist      : SkewCauchy(loc=loc_rfi, sigma=scale_rfi, a=0.99)
     clean_dist    : Normal(0, sigma_clean)
     fixed         : sigma_clean->calculated from data
@@ -175,14 +225,17 @@ def run_mixture_model(pointing, L, pol, tv_subband, random_seed, run_dir,
 
 if __name__ == "__main__":
 
+    job_map = POOLED_JOB_MAP if cli.pool_pointings_requested() else JOB_MAP
+
     parser = cli.build_parser(
         description="Pipeline stage 2: fit the hierarchical mixture model for one "
                     "(pointing, TV sub-band, polarization) combination.",
-        n_jobs=len(JOB_MAP),
+        n_jobs=len(job_map),
         epilog="Examples:\n"
                "  python fit.py 0\n"
                "  python fit.py 0 --run-dir out_chrono_split --split-method chrono --half 0\n"
                "  python fit.py 0 --run-dir out_random --split-method random --half 1 --seed 17\n"
+               "  python fit.py 4 --pool-pointings          # TV7 xx, all pointings of all nights\n"
                "  python fit.py --n-jobs",
     )
     cli.add_run_dir(parser, default="out",
@@ -204,6 +257,24 @@ if __name__ == "__main__":
              f"(default: {RANDOM_SEED}). With --split-method random it is also "
              "appended to --run-dir, e.g. 'out_random' + 17 -> 'out_random_17'",
     )
+    cli.add_pool_pointings(parser)
+    parser.add_argument("--n-legendre", type=int, default=L, metavar="INT",
+                        help=f"number of Legendre background terms (default: {L}, tuned "
+                             "for ~30-minute nights; use fewer for short blocks)")
+    parser.add_argument("--num-warmup", type=int, default=NUM_WARMUP, metavar="INT",
+                        help=f"NUTS warm-up iterations per chain (default: {NUM_WARMUP})")
+    parser.add_argument("--num-samples", type=int, default=NUM_SAMPLES, metavar="INT",
+                        help=f"NUTS samples kept per chain (default: {NUM_SAMPLES})")
+    parser.add_argument("--num-chains", type=int, default=N_CHAINS, metavar="INT",
+                        help=f"NUTS chains (default: {N_CHAINS}, one per core up to 48)")
+    parser.add_argument("--rescale-noise", type=float, default=None, metavar="SIGMA",
+                        help="rescale the data so the median noise is SIGMA, keeping the "
+                             "priors as wide relative to the noise as in the paper "
+                             f"(~{mixture_model.PAPER_SIGMA_NOISE} there); for non-2014 data, "
+                             "e.g. MWAX via Birli. Default: no rescaling")
+    parser.add_argument("--non-centred", action="store_true",
+                        help="sample the Legendre coefficients non-centred (same model, "
+                             "no funnel); recommended when fitting only a few nights")
     args = cli.parse_args(parser)
 
     # A half-split is only defined by both halves of the description, so
@@ -217,7 +288,8 @@ if __name__ == "__main__":
         run_dir = f"{run_dir}_{args.seed}"
     run_dir = cli.resolve_run_dir(run_dir, ABS_DIR)
 
-    L, tv_subband, pointing, pol = JOB_MAP[args.job_index]
+    _, tv_subband, pointing, pol = job_map[args.job_index]
+    L = args.n_legendre
 
     cli.print_config(
         "Fit mixture model",
@@ -234,4 +306,7 @@ if __name__ == "__main__":
 
     # Run the mixture model
     run_mixture_model(pointing, L, pol, tv_subband, args.seed, run_dir,
-                        split_method=args.split_method, half=args.half)
+                        split_method=args.split_method, half=args.half,
+                        num_warmup=args.num_warmup, num_samples=args.num_samples,
+                        num_chains=args.num_chains, rescale_noise=args.rescale_noise,
+                        non_centred=args.non_centred)

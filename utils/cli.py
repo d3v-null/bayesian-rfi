@@ -159,3 +159,32 @@ def print_config(title, **fields):
     for key, value in fields.items():
         print(f"{key.ljust(width)} : {value}")
     print()
+
+
+def add_pool_pointings(parser):
+    """
+    Add the `--pool-pointings` option shared by the stages whose job grid is
+    over (pointing, TV sub-band, polarization) (fit, postprocess).
+
+    With it, every pointing's (night, pointing) blocks go into one fit per
+    (TV sub-band, polarization), which is how the observations of a single
+    night are stacked. The grid then has no pointing axis, so call
+    `pool_pointings_requested` *before* `build_parser` to size it.
+    """
+    parser.add_argument(
+        "--pool-pointings",
+        action="store_true",
+        help="fit every pointing's (night, pointing) blocks together, one task per "
+             "(TV sub-band, polarization); use this to stack a single night",
+    )
+
+
+def pool_pointings_requested(argv=None):
+    """
+    Whether `--pool-pointings` is on the command line, read ahead of the full
+    parse because it changes the size of the job grid `build_parser` needs.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--pool-pointings", action="store_true")
+    known, _ = pre.parse_known_args(argv)
+    return known.pool_pointings

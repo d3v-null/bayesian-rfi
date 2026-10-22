@@ -175,6 +175,39 @@ Note that this is all experimental and subject to change.
 
 **Out:** `data*/uvflag/{obsid}_flags.h5`, rewritten in place
 
+## One coarse channel, one night (MWAX)
+
+The pipeline also runs on preprocessed visibilities of a single MWA coarse channel per
+observation, stacking all observations of a single night:
+
+```bash
+# Birli output, one {obsid}*.uvfits (or .ms) plus {obsid}.metafits per observation
+python preprocess.py <job_index> --input uvfits          # one task per (night, pointing), as before
+python fit.py        <job_index> --pool-pointings --rescale-noise 0.335 --non-centred
+python postprocess.py <job_index> --pool-pointings
+python summarize_season.py 0
+```
+
+* `--input uvfits|ms` reads `{obsid}*.uvfits` / `{obsid}*.ms` instead of raw correlator FITS.
+  Raw MWAX files with correlator delay tracking (`DELAYMOD=FULLTRACK`) can't be read by
+  pyuvdata 3.x at all, so this is the way in for them. The coarse-band mask and SSINS
+  match-filter shapes adapt to whatever band is present, and sub-bands with no channels are
+  skipped (only that sub-band's `fit.py`/`postprocess.py` tasks then do anything).
+* `--pool-pointings` fits every (night, pointing) block of a sub-band/polarization together
+  (grid: `python fit.py --n-jobs --pool-pointings` -> 10), with pointing label `all`. Each
+  block keeps its own Legendre background and noise level, exactly like a night in the
+  season fit; the RFI parameters are shared. Block ids are `<night>_p<pointing>`.
+* `--rescale-noise SIGMA` rescales the data by one factor so the median noise is `SIGMA`
+  (0.335 in the 2014 data), keeping the absolute-unit priors as wide relative to the noise as
+  in the paper. The factor is saved next to the chains and reapplied by `postprocess.py`.
+* `--non-centred` samples the Legendre coefficients non-centred: the same model, without the
+  funnel that makes NUTS diverge when there are only a few nights/blocks.
+* `--n-legendre`, `--num-warmup`, `--num-samples`, `--num-chains` override the paper's
+  settings (24 terms for ~30-minute nights; 6000/3000 draws on 48 chains).
+
+`tests/make_synthetic_night.py` writes a small synthetic night of this kind (two pointings,
+three observations each, injected RFI bursts) for an end-to-end check.
+
 ## Half-season splits
 
 Stages 2–4 accept a half-split for reproducibility checks: fit each half of the season

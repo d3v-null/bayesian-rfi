@@ -12,6 +12,8 @@ import pandas as pd
 import plotting_utils as plu
 import postprocessing_utils as pu
 
+import mixture_model
+
 # ----------------------------
 # Globals
 # ----------------------------
@@ -31,6 +33,16 @@ JOB_MAP = {
         (tv, p, pol)
         for tv   in TV_SUBBANDS
         for p    in POINTINGS
+        for pol  in POLARIZATIONS
+    )
+}
+
+# `--pool-pointings`: same grid as `fit.py --pool-pointings`
+POOLED_JOB_MAP = {
+    idx: (L, tv, mixture_model.POOLED_POINTING, pol)
+    for idx, (tv, pol) in enumerate(
+        (tv, pol)
+        for tv   in TV_SUBBANDS
         for pol  in POLARIZATIONS
     )
 }
@@ -140,9 +152,10 @@ def postprocess_chains(L, tv_subband, pointing, polarization, run_dir, abs_dir=A
 
     Parameters
     ----------
-    L            : int    Number of Legendre coefficients.
+    L            : int    Number of Legendre coefficients. Overridden by the
+                   number the chains were actually fit with (`fit.py --n-legendre`).
     tv_subband   : str    TV sub-band identifier (e.g. 'TV7').
-    pointing     : int    Pointing index.
+    pointing     : int or str  Pointing index, or `mixture_model.POOLED_POINTING`.
     polarization : str    Polarization string (e.g. 'xx').
     abs_dir      : str    Absolute path to project root directory.
     run_dir      : str, optional  Directory tree to read chains from / write processed
@@ -160,6 +173,12 @@ def postprocess_chains(L, tv_subband, pointing, polarization, run_dir, abs_dir=A
         matching_files = [f for f in matching_files if f"_half{half}_" in os.path.basename(f)]
     else:
         matching_files = [f for f in matching_files if "_half" not in os.path.basename(f)]
+
+    if not matching_files and not mixture_model.build_dataset(pointing, tv_subband, abs_dir)[0]:
+        # nothing was fit because there is no data, e.g. a sub-band a single
+        # coarse channel doesn't reach
+        print(f"No input data for {tv_subband}, pointing {pointing}: nothing to postprocess.")
+        return
 
     if not matching_files:
         raise FileNotFoundError(f"No chains file found matching pattern: {pattern}"
@@ -190,6 +209,14 @@ def postprocess_chains(L, tv_subband, pointing, polarization, run_dir, abs_dir=A
         print(f"No saved night list found at {nights_path}; using the full (rejection-filtered) "
               "season. Only correct if this chain was fit on the full season.")
 
+    # ---- Data rescaling applied at fit time (fit.py --rescale-noise) -----
+    scale_path = os.path.join(run_dir, f"chains/chains_{output_timestring}_scale.txt")
+    scale = 1.0
+    if os.path.exists(scale_path):
+        with open(scale_path) as f:
+            scale = float(f.read().strip())
+        print(f"Data were rescaled by {scale:.6g} at fit time")
+
     savepath = os.path.join(run_dir, f"processed/processed_{output_timestring}/")
     os.makedirs(savepath, exist_ok=True)
     print("Saving processed plots and metrics to:", savepath)
@@ -199,10 +226,12 @@ def postprocess_chains(L, tv_subband, pointing, polarization, run_dir, abs_dir=A
         az.from_netcdf(output_file),
         savepath=savepath,
     )
+    L = int(idata.posterior['beta'].shape[-1])
 
     # ---- Load input data -----------------------------------------------
     sigma_clean, data_dict, rejected_obsids = pu.load_input_data(
-        L, abs_dir, tv_subband, pointing, polarization, keep_night_ids=keep_night_ids
+        L, abs_dir, tv_subband, pointing, polarization, keep_night_ids=keep_night_ids,
+        scale=scale,
     )
 
     # ---- Convergence plots --------------------------------------------
@@ -297,23 +326,27 @@ def postprocess_chains(L, tv_subband, pointing, polarization, run_dir, abs_dir=A
 
 if __name__ == "__main__":
 
+    job_map = POOLED_JOB_MAP if cli.pool_pointings_requested() else JOB_MAP
+
     parser = cli.build_parser(
         description="Pipeline stage 3: postprocess one fit's chains -- diagnostics, "
                     "labels, goodness-of-fit -- into the shared season results file.",
-        n_jobs=len(JOB_MAP),
+        n_jobs=len(job_map),
         epilog="Examples:\n"
                "  python postprocess.py 0\n"
                "  python postprocess.py 0 --run-dir out_chrono_split --half 0\n"
+               "  python postprocess.py 4 --pool-pointings\n"
                "  python postprocess.py --n-jobs",
     )
     cli.add_run_dir(parser, default="out",
                     help="run directory to read chains/ from and write processed/ into")
     cli.add_half(parser)
+    cli.add_pool_pointings(parser)
     args = cli.parse_args(parser)
 
     run_dir = cli.resolve_run_dir(args.run_dir, ABS_DIR)
 
-    L, tv_subband, pointing, polarization = JOB_MAP[args.job_index]
+    L, tv_subband, pointing, polarization = job_map[args.job_index]
 
     cli.print_config(
         "Postprocess chains",

@@ -64,6 +64,11 @@ def summarize_season(run_dir, half=None):
     # One row per (pol, tv_subband, pointing)
     combo_df = df.drop_duplicates(subset=['pol', 'tv_subband', 'pointing']).copy()
 
+    # A `--pool-pointings` run adds a pointing labelled "all"
+    pooled         = (df['pointing'] == hdf5_utils.POOLED_POINTING).any()
+    pointings      = POINTINGS      + ([hdf5_utils.POOLED_POINTING] if pooled else [])
+    pointing_order = POINTING_ORDER + ([hdf5_utils.POOLED_POINTING] if pooled else [])
+
     # ----------------------------
     # w_rfi heatmap vs pointing/subband
     # ----------------------------
@@ -73,7 +78,7 @@ def summarize_season(run_dir, half=None):
         subset = combo_df[combo_df['pol'] == pol].copy()
         subset['w_rfi_median'] = 1 - subset['w_clean_median']
         pivot  = subset.pivot(index='pointing', columns='tv_subband', values='w_rfi_median')
-        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=POINTINGS)
+        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=pointings)
         sns.heatmap(pivot, annot=True, fmt='.3f', ax=ax, cmap='Reds', vmin=0, vmax=0.133)
         ax.set_title(f"w_rfi median — pol={pol}")
         ax.set_xlabel("TV subband")
@@ -90,7 +95,7 @@ def summarize_season(run_dir, half=None):
         fig, ax = plt.subplots(figsize=(8, 5))
         subset = combo_df[combo_df['pol'] == pol]
         pivot  = subset.pivot(index='pointing', columns='tv_subband', values='loc_rfi_median')
-        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=POINTINGS)
+        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=pointings)
         sns.heatmap(pivot, annot=True, fmt='.3f', ax=ax, cmap='Reds',
                     vmin=0, vmax=0.154,
                    )
@@ -109,7 +114,7 @@ def summarize_season(run_dir, half=None):
         fig, ax = plt.subplots(figsize=(8, 5))
         subset = combo_df[combo_df['pol'] == pol]
         pivot  = subset.pivot(index='pointing', columns='tv_subband', values='scale_rfi_median')
-        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=POINTINGS)
+        pivot  = pivot.reindex(columns=TV_SUBBANDS, index=pointings)
         sns.heatmap(pivot, annot=True, fmt='.3f', ax=ax, cmap='Reds',
                    vmin=0, vmax=2.68,
                    )
@@ -124,9 +129,9 @@ def summarize_season(run_dir, half=None):
     # w_rfi vs subband, all pointings overlaid
     # ----------------------------
     
-    series  = [(p, pol) for p in POINTING_ORDER for pol in MARKERS]
+    series  = [(p, pol) for p in pointing_order for pol in MARKERS]
     colors  = np.array(sns.color_palette("Paired")).reshape(-1, 2, 3)[:, ::-1].reshape(-1, 3)
-    offsets = dict(zip(POINTING_ORDER, np.linspace(-0.36, 0.36, len(POINTING_ORDER))))
+    offsets = dict(zip(pointing_order, np.linspace(-0.36, 0.36, len(pointing_order))))
 
     fig, ax = plt.subplots(figsize=(9, 3.5))
 
@@ -145,7 +150,7 @@ def summarize_season(run_dir, half=None):
             capsize=2, elinewidth=0.9,
             linestyle='none',
             zorder=3,                                      # markers above the bars
-            label=f"{POINTING_DICT[p]} {pol}",
+            label=f"{POINTING_DICT.get(p, p)} {pol}",
         )
 
     for i in range(len(TV_SUBBANDS) - 1):                  # group separators
@@ -170,12 +175,12 @@ def summarize_season(run_dir, half=None):
 
     night_df = df.drop_duplicates(subset=['pol', 'tv_subband', 'pointing', 'night'])
 
-    fig, axes = plt.subplots(len(TV_SUBBANDS), len(POINTINGS),
-                              figsize=(4 * len(POINTINGS), 3 * len(TV_SUBBANDS)),
+    fig, axes = plt.subplots(len(TV_SUBBANDS), len(pointings),
+                              figsize=(4 * len(pointings), 3 * len(TV_SUBBANDS)),
                               sharex=False, sharey=True)
 
     for i, tv in enumerate(TV_SUBBANDS):
-        for j, p in enumerate(POINTINGS):
+        for j, p in enumerate(pointings):
             ax = axes[i][j]
             for pol, color in zip(POLARIZATIONS, sns.color_palette()[:2]):
                 subset = night_df[

@@ -304,9 +304,9 @@ def night_dates(night_ids):
 
     A night id is an MWA obsid with its last four digits dropped, and an obsid
     is its GPS start second, so `night * 10_000` is the GPS second the night
-    starts at.
+    starts at. A pooled fit's `_p<pointing>` suffix is ignored.
     """
-    return np.array([Time(int(n) * 10_000, format='gps').utc.datetime
+    return np.array([Time(int(str(n).partition("_p")[0]) * 10_000, format='gps').utc.datetime
                      for n in night_ids])
 
 

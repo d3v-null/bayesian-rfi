@@ -13,6 +13,14 @@ TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
 POLARIZATIONS = ['xx', 'yy']
 
+# Pointing label of a `--pool-pointings` fit; must match mixture_model.POOLED_POINTING
+POOLED_POINTING = "all"
+
+
+def _night_key(night_id):
+    """A night id as stored: int for a plain night, str ('144100_p2') for a pooled-fit block."""
+    return int(night_id) if str(night_id).isdigit() else str(night_id)
+
 @contextlib.contextmanager
 def locked_hdf5(path, mode='a', retries=20, wait=3.0):
     """
@@ -340,10 +348,11 @@ def read_season_results(h5_path):
     with locked_hdf5(h5_path, mode='r') as f:
         for pol in POLARIZATIONS:
             for tv in TV_SUBBANDS:
-                for p in POINTINGS:
+                for p in POINTINGS + [POOLED_POINTING]:
                     root = f"/{p}/{tv}/{pol}"
                     if root not in f:
-                        print(f"No match found for {tv}, {p}, {pol}. Continuing...")
+                        if p != POOLED_POINTING:
+                            print(f"No match found for {tv}, {p}, {pol}. Continuing...")
                         continue
                     grp = f[root]
                     ps  = grp['posterior_summary']
@@ -358,12 +367,12 @@ def read_season_results(h5_path):
                     # ---- per-night chi2 / nll, keyed by night id -----------
                     cg = ps['chisq_per_night']
                     chi2_by_night = {
-                        int(night): (cg['median'][n], cg['hdi_94_lo'][n], cg['hdi_94_hi'][n])
+                        _night_key(night): (cg['median'][n], cg['hdi_94_lo'][n], cg['hdi_94_hi'][n])
                         for n, night in enumerate(cg['night_ids'].asstr()[()])
                     }
                     ng = ps['rfi_nll_per_night']
                     nll_by_night = {
-                        int(night): (ng['median'][n], ng['hdi_94_lo'][n], ng['hdi_94_hi'][n])
+                        _night_key(night): (ng['median'][n], ng['hdi_94_lo'][n], ng['hdi_94_hi'][n])
                         for n, night in enumerate(ng['night_ids'].asstr()[()])
                     }
 
@@ -373,7 +382,7 @@ def read_season_results(h5_path):
                     soft_labels = np.asarray(lg['soft_labels'])
                     times       = np.asarray(lg['time_stamps'])
                     lengths     = np.asarray(lg['lengths'])      # (N_nights,)
-                    night_ids   = [int(n) for n in lg['night_ids'].asstr()[()]]
+                    night_ids   = [_night_key(n) for n in lg['night_ids'].asstr()[()]]
 
                     # Files written before residuals/soft_labels_std were
                     # persisted won't have these datasets -- fall back to NaN.
@@ -453,7 +462,7 @@ def read_rejected_obsids(h5_path):
 
     with locked_hdf5(h5_path, mode='r') as f:
         for tv in TV_SUBBANDS:
-            for p in POINTINGS:
+            for p in POINTINGS + [POOLED_POINTING]:
                 root = f"/{p}/{tv}"
                 if root not in f or 'rejected_obsids' not in f[root]:
                     continue

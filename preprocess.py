@@ -21,7 +21,7 @@ ABS_DIR     = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Re
 TV_SUBBANDS = ('subTV', 'TV6', 'TV7', 'TV8', 'TV9')
 
 # MWA coarse-channel layout used to build the coarse-band flag mask.
-N_COARSE        = 24      # coarse channels in an observation
+N_COARSE        = 24      # coarse channels in a full legacy observation
 COARSE_BW_HZ    = 1.28e6  # coarse channel width
 EDGE_FLAG_HZ    = 80e3    # width flagged at each coarse-channel edge (aliasing)
 
@@ -29,8 +29,27 @@ EDGE_FLAG_HZ    = 80e3    # width flagged at each coarse-channel edge (aliasing)
 DATA_DIR = os.environ.get("BAYESRFI_DATA_DIR", "/users/jmduchar/data/shared/big_dataset/")
 OUT_DIR  = os.path.join(ABS_DIR, "data/")
 
+# How each obsid's visibilities are found in DATA_DIR (`--input`). "gpubox" is the
+# raw correlator FITS + metafits set the 2014 analysis used; "uvfits" and "ms" are
+# preprocessed files (e.g. from Birli), which is the only way in for MWAX data
+# with correlator-side delay tracking (DELAYMOD=FULLTRACK), which pyuvdata 3.x
+# refuses to read raw.
+INPUT_GLOBS = {
+    'gpubox': "*{obsid}*fits",
+    'uvfits': "*{obsid}*.uvfits",
+    'ms':     "*{obsid}*.ms",
+}
 
-def coarse_band_mask(freq_array, n_coarse=N_COARSE, coarse_bw=COARSE_BW_HZ, edge_flag=EDGE_FLAG_HZ):
+# DTV match-filter shapes (Hz); see Table 1 of the paper.
+SHAPE_DICT = {
+    'TV6': [1.74e8, 1.81e8],
+    'TV7': [1.81e8, 1.88e8],
+    'TV8': [1.88e8, 1.95e8],
+    'TV9': [1.95e8, 2.02e8],
+}
+
+
+def coarse_band_mask(freq_array, n_coarse=None, coarse_bw=COARSE_BW_HZ, edge_flag=EDGE_FLAG_HZ):
     """
     Boolean mask of the fine channels to flag in every MWA coarse channel: the
     `edge_flag` Hz at each edge (aliased by the polyphase filterbank) and the
@@ -41,6 +60,10 @@ def coarse_band_mask(freq_array, n_coarse=N_COARSE, coarse_bw=COARSE_BW_HZ, edge
     ----------
     freq_array : ndarray
         Fine-channel centre frequencies in Hz, ascending.
+    n_coarse : int, optional
+        Number of coarse channels the frequency axis spans. Inferred from its
+        total bandwidth if omitted, so a single coarse channel (e.g. one MWAX
+        `_ch###` file) works as well as the full 24-channel band.
 
     Returns
     -------
@@ -49,6 +72,9 @@ def coarse_band_mask(freq_array, n_coarse=N_COARSE, coarse_bw=COARSE_BW_HZ, edge
     """
     freq_array = np.asarray(freq_array).ravel()
     nfreqs = freq_array.size
+    if n_coarse is None:
+        df = float(np.median(np.diff(freq_array)))
+        n_coarse = max(1, round(nfreqs * df / coarse_bw))
     if nfreqs % n_coarse:
         raise ValueError(f"Nfreqs={nfreqs} is not a multiple of {n_coarse} coarse channels")
     n_fine = nfreqs // n_coarse
@@ -108,7 +134,19 @@ def build_initial_uvflag(ins, obs, uvf_save_dir, drop_first_last, cb):
     uvf.write(os.path.join(uvf_save_dir, f"{obs}_flags.h5"), clobber=True)
 
 
-def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False):
+def match_filter_shapes(freq_array, shape_dict=SHAPE_DICT):
+    """
+    The DTV shapes that overlap the observed band.
+
+    SSINS turns a shape lying wholly outside the band into a spurious one-channel
+    shape at the band edge, so with a single coarse channel only the sub-band(s)
+    it actually sits in are kept.
+    """
+    lo, hi = float(np.min(freq_array)), float(np.max(freq_array))
+    return {name: band for name, band in shape_dict.items() if band[0] < hi and band[1] > lo}
+
+
+def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False, input_format='gpubox'):
     """
     Load a visibility file, apply initial flags, run the default SSINS match filter,
     and return the flagged INS object.
@@ -124,7 +162,7 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
     obsid : str
         MWA OBSID used to glob for input .fits files in data_dir.
     data_dir : str
-        Directory containing raw .fits files.
+        Directory containing the input visibility files.
     uvf_save_dir : str
         Output directory for the UVFlag file.
     drop_first_last : bool, optional
@@ -132,6 +170,9 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
         Default True.
     verbose : bool, optional
         If True, print out additional info to stdout.
+    input_format : str, optional
+        Key of INPUT_GLOBS: 'gpubox' (raw correlator FITS + metafits, default),
+        'uvfits' or 'ms' (preprocessed, e.g. by Birli).
 
     Returns
     -------
@@ -145,9 +186,11 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
         (see `coarse_band_mask`).
     """
 
-    obsfiles = glob.glob(data_dir+f"*{obsid}*fits")
+    obsfiles = sorted(glob.glob(os.path.join(data_dir, INPUT_GLOBS[input_format].format(obsid=obsid))))
+    if not obsfiles:
+        raise ValueError(f"no {input_format} input for OBSID {obsid} in {data_dir}")
     ss = SS()
-    ss.read(obsfiles, diff=True)
+    ss.read(obsfiles if len(obsfiles) > 1 else obsfiles[0], diff=True)
 
     if verbose:
         print(f"OBSID {obsid} successfully read in as an SS object.")
@@ -170,12 +213,7 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
     if verbose:
         print(f"OBSID {obsid} successfully converted to INS object.")
 
-    shape_dict = {
-        'TV6': [1.74e8, 1.81e8],
-        'TV7': [1.81e8, 1.88e8],
-        'TV8': [1.88e8, 1.95e8],
-        'TV9': [1.95e8, 2.02e8],
-        }
+    shape_dict = match_filter_shapes(ins.freq_array)
     sig_thresh = {shape: 5 for shape in shape_dict}
     sig_thresh["narrow"] = 5
     sig_thresh["streak"] = 10
@@ -197,7 +235,9 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
 
     # INS (a waterfall UVFlag) has Nbls=None; remember how many baselines went
     # into the incoherent average for the thermal-noise estimate downstream.
-    ins.nbls_averaged = int(ss.Nbls)
+    # spectrum_type='cross' averages cross-correlations only, so autos don't count.
+    cross = ss.ant_1_array != ss.ant_2_array
+    ins.nbls_averaged = int(np.unique(ss.baseline_array[cross]).size)
 
     return ins
 
@@ -296,6 +336,7 @@ def process_night_pointing(
     out_dir,
     drop_first_last=True,
     verbose=False,
+    input_format='gpubox',
     ):
     """
     Process all observations for a single night/pointing and save per-subband
@@ -317,7 +358,7 @@ def process_night_pointing(
     night_pointing_dict : dict
         Mapping from (date, pointing) keys to arrays of obsids.
     in_dir : str
-        Directory containing raw .fits files.
+        Directory containing the input visibility files.
     out_dir : str
         Root output directory. Subdirectories tv_split/{tv_subband} and
         uvflag/ are created here if they don't exist.
@@ -325,6 +366,11 @@ def process_night_pointing(
         If True, flag and drop the first and last time integrations. Default True.
     verbose : bool, optional
         If True, print out additional info to stdout.
+    input_format : str, optional
+        Passed through to `build_ins`.
+
+    Sub-bands with no channels in the data (e.g. all but one when the input is a
+    single coarse channel) are skipped rather than written as all-NaN series.
     """
 
     date, pointing = night_pointing_key
@@ -343,7 +389,8 @@ def process_night_pointing(
     # so allow the per-obsid work to run in parallel (BAYESRFI_NPROC, default 1).
     nproc = int(os.environ.get("BAYESRFI_NPROC", "1"))
     build_kwargs = dict(data_dir=in_dir, drop_first_last=drop_first_last,
-                        uvf_save_dir=uvf_save_dir, verbose=verbose)
+                        uvf_save_dir=uvf_save_dir, verbose=verbose,
+                        input_format=input_format)
     ins_dir = os.path.join(out_dir, "ins")  # per-obsid INS cache (also makes reruns cheap)
     if nproc > 1:
         from concurrent.futures import ProcessPoolExecutor
@@ -388,6 +435,10 @@ def process_night_pointing(
         os.makedirs(save_dir, exist_ok=True)
 
         freq_mask, freq_mask_flags = get_freq_mask(ins.freq_array, tv_subband)
+        if not (freq_mask & ~CB).any():
+            if verbose:
+                print(f"No unflagged channels in {tv_subband}; skipping it.")
+            continue
 
         flags_subband    = flags[:, freq_mask_flags]
         flags_subband_1d = np.any(flags_subband, axis=-1)
@@ -447,6 +498,7 @@ def preprocess_single_night(
     night_idx,
     datapath=DATA_DIR,
     out_dir=OUT_DIR,
+    input_format='gpubox',
     ):
     """
     Look up the night_idx'th (date, pointing) in the season and process it.
@@ -459,6 +511,8 @@ def preprocess_single_night(
         Directory containing raw .fits files.
     out_dir : str, optional
         Root output directory, passed through to process_night_pointing.
+    input_format : str, optional
+        Passed through to process_night_pointing (see INPUT_GLOBS).
     """
     night_pointing_dict = get_season(datapath)
     key = list(night_pointing_dict.keys())[night_idx]
@@ -470,6 +524,7 @@ def preprocess_single_night(
         out_dir             = out_dir,
         drop_first_last     = True,
         verbose             = True,
+        input_format        = input_format,
     )
 
 
@@ -485,7 +540,18 @@ if __name__ == "__main__":
         n_jobs=get_n_jobs(),
         epilog="Examples:\n"
                "  python preprocess.py 0\n"
+               "  python preprocess.py 0 --input uvfits   # Birli output, e.g. one MWAX coarse channel\n"
                "  python preprocess.py --n-jobs",
+    )
+    parser.add_argument(
+        "--input",
+        choices=tuple(INPUT_GLOBS),
+        default="gpubox",
+        dest="input_format",
+        help="visibility files to read per obsid from BAYESRFI_DATA_DIR: raw "
+             "correlator FITS + metafits ('gpubox', default), or preprocessed "
+             "'uvfits' / 'ms' (e.g. Birli output). A .metafits per obsid is "
+             "always needed to group obsids by night and pointing",
     )
     args = cli.parse_args(parser)
 
@@ -496,8 +562,9 @@ if __name__ == "__main__":
         job_index = args.job_index,
         night     = date,
         pointing  = pointing,
+        input     = args.input_format,
         data_dir  = DATA_DIR,
         out_dir   = OUT_DIR,
     )
 
-    preprocess_single_night(args.job_index)
+    preprocess_single_night(args.job_index, input_format=args.input_format)

@@ -7,7 +7,7 @@ import yaml
 import mixture_model
 
 
-def load_input_data(L, abs_dir, tv_subband, pointing, polarization, keep_night_ids=None):
+def load_input_data(L, abs_dir, tv_subband, pointing, polarization, keep_night_ids=None, scale=1.0):
     """
     Load and package one (tv_subband, pointing, polarization) combination's
     nightly data for postprocessing, mirroring the inputs the model was fit on.
@@ -43,6 +43,9 @@ def load_input_data(L, abs_dir, tv_subband, pointing, polarization, keep_night_i
         nights. If None, uses the full (rejection-filtered) season -- only
         correct for a run that wasn't
         split (`split_method=None` at fit time).
+    scale : float, optional
+        Factor the data were rescaled by at fit time (`fit.py --rescale-noise`,
+        saved in the `_scale.txt` sidecar). Default 1, no rescaling.
 
     Returns
     -------
@@ -84,6 +87,9 @@ def load_input_data(L, abs_dir, tv_subband, pointing, polarization, keep_night_i
     nchans = [int(d['nchan']) for d in all_data] if all('nchan' in d for d in all_data) else None
     sigma_clean = mixture_model.calculate_sigma_clean(raw_samples, tv_subband_dict=tv_subband_dict, tv_subband=tv_subband,
                                                       nbls=nbls, nchans=nchans)
+    if scale != 1.0:
+        raw_samples = [np.asarray(s) * scale for s in raw_samples]
+        sigma_clean = sigma_clean * scale
     data_dict = mixture_model.prepare_multiple_nights(raw_samples,
                                                     L=L,
                                                     flags=ssin_flags,
