@@ -36,11 +36,13 @@ OUT_DIR  = os.path.join(ABS_DIR, "data/")
 # raw correlator FITS + metafits set the 2014 analysis used; "uvfits" and "ms" are
 # preprocessed files (e.g. from Birli), which is the only way in for MWAX data
 # with correlator-side delay tracking (DELAYMOD=FULLTRACK), which pyuvdata 3.x
-# refuses to read raw.
+# refuses to read raw. "ins" is an INS already computed from the visibilities, e.g. by
+# `hyperdrive bmetrics --ins`, in the format of SSINS's `INS.write(output_type="data")`.
 INPUT_GLOBS = {
     'gpubox': "*{obsid}*fits",
     'uvfits': "*{obsid}*.uvfits",
     'ms':     "*{obsid}*.ms",
+    'ins':    "{obsid}_SSINS_data.h5",
 }
 
 # DTV match-filter shapes (Hz); see Table 1 of the paper.
@@ -151,6 +153,56 @@ def match_filter_shapes(freq_array, shape_dict=SHAPE_DICT):
     return {name: band for name, band in shape_dict.items() if band[0] < hi and band[1] > lo}
 
 
+def _ins_from_visibilities(obsfiles, drop_first_last):
+    """
+    SSINS INS of the cross-correlations of one observation's visibility files,
+    with the coarse-band and (optionally) first/last-time flags applied first.
+    Returns (ins, number of cross-correlation baselines averaged).
+    """
+    ss = SS()
+    ss.read(obsfiles if len(obsfiles) > 1 else obsfiles[0], diff=True)
+
+    cb = coarse_band_mask(ss.freq_array)
+
+    initial_flags = np.broadcast_to(cb[np.newaxis, :, np.newaxis], (ss.Ntimes, ss.Nfreqs, ss.Npols)).copy()
+
+    if drop_first_last:
+        initial_flags[[0, -1], :, :] = True
+
+    initial_ss_flags = np.reshape(
+        np.broadcast_to(initial_flags[:, np.newaxis, :, :], (ss.Ntimes, ss.Nbls, ss.Nfreqs, ss.Npols)).copy(),
+        (ss.Ntimes * ss.Nbls, ss.Nfreqs, ss.Npols)
+    )
+    ss.apply_flags(flag_choice="custom", custom=initial_ss_flags)
+
+    ins = INS(ss, spectrum_type = 'cross', order=0)
+
+    # spectrum_type='cross' averages cross-correlations only, so autos don't count.
+    cross = ss.ant_1_array != ss.ant_2_array
+    return ins, int(np.unique(ss.baseline_array[cross]).size)
+
+
+def _read_precomputed_ins(path, drop_first_last):
+    """
+    Read a cross-correlation INS written in SSINS's `INS.write(output_type="data")`
+    format (e.g. `hyperdrive bmetrics --ins`) and apply the same coarse-band and
+    first/last-time flags `_ins_from_visibilities` applies to the visibilities.
+    Its weights are the number of baselines averaged per (time, channel).
+    Returns (ins, number of baselines averaged).
+    """
+    ins = INS(path)
+    if "spectrum_type:cross" not in ins.history:
+        raise ValueError(f"{path} is not a cross-correlation INS")
+
+    cb = coarse_band_mask(ins.freq_array)
+    ins.metric_array[:, cb, :] = np.ma.masked
+    if drop_first_last:
+        ins.metric_array[[0, -1], :, :] = np.ma.masked
+    ins.metric_ms = ins.mean_subtract()
+
+    return ins, int(ins.weights_array.max())
+
+
 def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False, input_format='gpubox'):
     """
     Load a visibility file, apply initial flags, run the default SSINS match filter,
@@ -177,7 +229,8 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
         If True, print out additional info to stdout.
     input_format : str, optional
         Key of INPUT_GLOBS: 'gpubox' (raw correlator FITS + metafits, default),
-        'uvfits' or 'ms' (preprocessed, e.g. by Birli).
+        'uvfits' or 'ms' (preprocessed, e.g. by Birli), or 'ins' (a precomputed
+        cross-correlation INS, e.g. from `hyperdrive bmetrics --ins`).
 
     Returns
     -------
@@ -194,29 +247,15 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
     obsfiles = sorted(glob.glob(os.path.join(data_dir, INPUT_GLOBS[input_format].format(obsid=obsid))))
     if not obsfiles:
         raise ValueError(f"no {input_format} input for OBSID {obsid} in {data_dir}")
-    ss = SS()
-    ss.read(obsfiles if len(obsfiles) > 1 else obsfiles[0], diff=True)
-
-    if verbose:
-        print(f"OBSID {obsid} successfully read in as an SS object.")
-
-    cb = coarse_band_mask(ss.freq_array)
-
-    initial_flags = np.broadcast_to(cb[np.newaxis, :, np.newaxis], (ss.Ntimes, ss.Nfreqs, ss.Npols)).copy()
-
-    if drop_first_last:
-        initial_flags[[0, -1], :, :] = True
-
-    initial_ss_flags = np.reshape(
-        np.broadcast_to(initial_flags[:, np.newaxis, :, :], (ss.Ntimes, ss.Nbls, ss.Nfreqs, ss.Npols)).copy(),
-        (ss.Ntimes * ss.Nbls, ss.Nfreqs, ss.Npols)
-    )
-    ss.apply_flags(flag_choice="custom", custom=initial_ss_flags)
-
-    ins = INS(ss, spectrum_type = 'cross', order=0)
+    if input_format == 'ins':
+        ins, nbls = _read_precomputed_ins(obsfiles[0], drop_first_last)
+    else:
+        ins, nbls = _ins_from_visibilities(obsfiles, drop_first_last)
 
     if verbose:
         print(f"OBSID {obsid} successfully converted to INS object.")
+
+    cb = coarse_band_mask(ins.freq_array)
 
     shape_dict = match_filter_shapes(ins.freq_array)
     sig_thresh = {shape: 5 for shape in shape_dict}
@@ -240,9 +279,7 @@ def build_ins(obsid, data_dir, uvf_save_dir, drop_first_last=True, verbose=False
 
     # INS (a waterfall UVFlag) has Nbls=None; remember how many baselines went
     # into the incoherent average for the thermal-noise estimate downstream.
-    # spectrum_type='cross' averages cross-correlations only, so autos don't count.
-    cross = ss.ant_1_array != ss.ant_2_array
-    ins.nbls_averaged = int(np.unique(ss.baseline_array[cross]).size)
+    ins.nbls_averaged = nbls
 
     return ins
 
@@ -555,8 +592,9 @@ if __name__ == "__main__":
         dest="input_format",
         help="visibility files to read per obsid from BAYESRFI_DATA_DIR: raw "
              "correlator FITS + metafits ('gpubox', default), or preprocessed "
-             "'uvfits' / 'ms' (e.g. Birli output). A .metafits per obsid is "
-             "always needed to group obsids by night and pointing",
+             "'uvfits' / 'ms' (e.g. Birli output), or a precomputed "
+             "'ins' ({obsid}_SSINS_data.h5, e.g. from hyperdrive bmetrics --ins). "
+             "A .metafits per obsid is always needed to group obsids by night and pointing",
     )
     args = cli.parse_args(parser)
 
