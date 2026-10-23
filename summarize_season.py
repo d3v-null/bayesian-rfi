@@ -15,12 +15,12 @@ ABS_DIR = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Resear
 
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
-POLARIZATIONS = ['xx', 'yy']
+POLARIZATIONS = os.environ.get('BAYESRFI_POLS', 'xx,yy').split(',')
 
 # MWA GRIDNUM -> pointings east(+)/west(-) convention
 POINTING_DICT  = {0: 0, 1: -1, 2: 1, 3: -2, 4: 2}
 POINTING_ORDER = [3, 1, 0, 2, 4]
-MARKERS        = {'xx': 'o', 'yy': 'X'}
+MARKERS        = {'xx': 'o', 'yy': 'X', 'xy': 's'}
 
 # This script isn't parallel over anything --> it reads the whole season at once
 N_JOBS = 1

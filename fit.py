@@ -29,7 +29,7 @@ from jax import random as jrandom
 ABS_DIR       = os.environ.get("BAYESRFI_ABS_DIR", "/oscar/data/jpober/jmduchar/Research/BayesRFI/")
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
-POLARIZATIONS = ['xx', 'yy']
+POLARIZATIONS = os.environ.get('BAYESRFI_POLS', 'xx,yy').split(',')
 L             = 24
 RANDOM_SEED   = 42
 

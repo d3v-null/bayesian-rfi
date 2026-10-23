@@ -28,10 +28,11 @@ TV_BANDS = {
 POL_TO_IDX = {
     'xx': 0,
     'yy': 1,
+    'xy': 2,
 }
 
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
-POLARIZATIONS = ['xx', 'yy']
+POLARIZATIONS = os.environ.get('BAYESRFI_POLS', 'xx,yy').split(',')
 
 UVFLAG_DIR = os.path.join(ABS_DIR, "data/uvflag/")
 H5_PATH    = os.path.join(ABS_DIR, "out/processed/", hdf5_utils.HDF5_FILENAME)

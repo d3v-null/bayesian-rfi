@@ -491,13 +491,19 @@ def process_night_pointing(
         metric_subband_yy  = ins.metric_array[:, freq_mask, 1]
         metric_subband_yy  = np.where(np.isfinite(metric_subband_yy), metric_subband_yy, np.nan)
         
+        # XY (pyuvdata pol index 2, -7) for cross-pol fits (BAYESRFI_POLS=xx,yy,xy)
+        metric_subband_xy  = ins.metric_array[:, freq_mask, 2] if ins.metric_array.shape[-1] > 2 else np.full_like(metric_subband_xx, np.nan)
+        metric_subband_xy  = np.where(np.isfinite(metric_subband_xy), metric_subband_xy, np.nan)
+
         avg_metric_subband_xx = np.nanmean(metric_subband_xx, axis = (1,))
         avg_metric_subband_yy = np.nanmean(metric_subband_yy, axis = (1,))
+        avg_metric_subband_xy = np.nanmean(metric_subband_xy, axis = (1,))
 
         np.savez(
             os.path.join(save_dir, f"processed_{obsids[0][:6]}_p{pointing}.npz"),
             xx         = mm_utils.pad_ssins(avg_metric_subband_xx, t_padded, ins.time_array),
             yy         = mm_utils.pad_ssins(avg_metric_subband_yy, t_padded, ins.time_array),
+            xy         = mm_utils.pad_ssins(avg_metric_subband_xy, t_padded, ins.time_array),
             ssins      = mm_utils.pad_ssins(flags_subband_1d,      t_padded, ins.time_array),
             time_jd    = t_padded,
             obsids     = obsids,

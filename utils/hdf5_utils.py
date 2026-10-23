@@ -11,7 +11,7 @@ HDF5_FILENAME = "season_results.h5"
 
 TV_SUBBANDS   = ['subTV', 'TV6', 'TV7', 'TV8', 'TV9']
 POINTINGS     = [0, 1, 2, 3, 4]
-POLARIZATIONS = ['xx', 'yy']
+POLARIZATIONS = os.environ.get('BAYESRFI_POLS', 'xx,yy').split(',')
 
 # Pointing label of a `--pool-pointings` fit; must match mixture_model.POOLED_POINTING
 POOLED_POINTING = "all"
