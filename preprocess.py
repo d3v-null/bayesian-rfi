@@ -23,7 +23,10 @@ TV_SUBBANDS = ('subTV', 'TV6', 'TV7', 'TV8', 'TV9')
 # MWA coarse-channel layout used to build the coarse-band flag mask.
 N_COARSE        = 24      # coarse channels in a full legacy observation
 COARSE_BW_HZ    = 1.28e6  # coarse channel width
-EDGE_FLAG_HZ    = 80e3    # width flagged at each coarse-channel edge (aliasing)
+# width flagged at each coarse-channel edge (legacy-PFB aliasing). MWAX Phase III (oversampled PFB) has no
+# aliased edges and no DC spike: set BAYESRFI_EDGE_FLAG_HZ=0 BAYESRFI_FLAG_DC=0 for that data.
+EDGE_FLAG_HZ    = float(os.environ.get('BAYESRFI_EDGE_FLAG_HZ', 80e3))
+FLAG_DC         = os.environ.get('BAYESRFI_FLAG_DC', '1') != '0'
 
 # Raw visibilities in, reduced per-sub-band time series out.
 DATA_DIR = os.environ.get("BAYESRFI_DATA_DIR", "/users/jmduchar/data/shared/big_dataset/")
@@ -84,9 +87,11 @@ def coarse_band_mask(freq_array, n_coarse=None, coarse_bw=COARSE_BW_HZ, edge_fla
     n_edge = int(round(edge_flag / df))
     cb = np.zeros(nfreqs, dtype=bool)
     for c in range(n_coarse):
-        cb[c * n_fine : c * n_fine + n_edge]          = True
-        cb[(c + 1) * n_fine - n_edge : (c + 1) * n_fine] = True
-        cb[c * n_fine + n_fine // 2]                  = True
+        if n_edge:
+            cb[c * n_fine : c * n_fine + n_edge]          = True
+            cb[(c + 1) * n_fine - n_edge : (c + 1) * n_fine] = True
+        if FLAG_DC:
+            cb[c * n_fine + n_fine // 2]              = True
     return cb
 
 
